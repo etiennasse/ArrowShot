@@ -38,13 +38,13 @@ flow natively.
 
 ```sh
 # symlink (or copy) into the GNOME extensions directory
-ln -s "$PWD" ~/.local/share/gnome-shell/extensions/arrowshot@omnimed.com
+ln -s "$PWD" ~/.local/share/gnome-shell/extensions/arrowshot@etiennasse.com
 glib-compile-schemas schemas/
-gnome-extensions enable arrowshot@omnimed.com
+gnome-extensions enable arrowshot@etiennasse.com
 # then log out and back in (Wayland loads extensions at session start)
 ```
 
-Open preferences with `gnome-extensions prefs arrowshot@omnimed.com`.
+Open preferences with `gnome-extensions prefs arrowshot@etiennasse.com`.
 
 ## Development
 
@@ -55,10 +55,10 @@ give the nested session its own config and a distinct shortcut:
 ```sh
 export TC=/tmp/arrowshot-nested
 mkdir -p "$TC"
-SCHEMA=~/.local/share/gnome-shell/extensions/arrowshot@omnimed.com/schemas
+SCHEMA=~/.local/share/gnome-shell/extensions/arrowshot@etiennasse.com/schemas
 XDG_CONFIG_HOME="$TC" dbus-run-session -- bash -c "
   gsettings set org.gnome.shell disable-user-extensions false
-  gsettings set org.gnome.shell enabled-extensions \"['arrowshot@omnimed.com']\"
+  gsettings set org.gnome.shell enabled-extensions \"['arrowshot@etiennasse.com']\"
   GSETTINGS_SCHEMA_DIR='$SCHEMA' gsettings set org.gnome.shell.extensions.arrowshot capture-shortcut \"['<Control><Alt>s']\""
 XDG_CONFIG_HOME="$TC" dbus-run-session -- gnome-shell --nested --wayland
 # inside the nested window, press Ctrl+Alt+S
