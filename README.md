@@ -58,12 +58,22 @@ ArrowShot won't load there without a port to the legacy extension format.
 
 ## Install
 
+**From a release (easiest):** download `arrowshot@etiennasse.com.shell-extension.zip`
+from the [Releases](https://github.com/etiennasse/ArrowShot/releases) page, then:
+
 ```sh
-# symlink (or copy) into the GNOME extensions directory
-ln -s "$PWD" ~/.local/share/gnome-shell/extensions/arrowshot@etiennasse.com
-glib-compile-schemas schemas/
+gnome-extensions install --force arrowshot@etiennasse.com.shell-extension.zip
+# log out and back in (Wayland loads extensions at session start), then:
 gnome-extensions enable arrowshot@etiennasse.com
-# then log out and back in (Wayland loads extensions at session start)
+```
+
+**From a clone:** run the installer (packs + installs, then enables or tells you to
+re-login):
+
+```sh
+git clone https://github.com/etiennasse/ArrowShot.git
+cd ArrowShot
+./install.sh
 ```
 
 Open preferences with `gnome-extensions prefs arrowshot@etiennasse.com`.
