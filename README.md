@@ -1,13 +1,18 @@
 # ArrowShot
 
-A Flameshot-style screenshot capture + annotation tool for **GNOME on Wayland**,
-implemented as a GNOME Shell extension.
+> Capture a screen region, annotate it — arrows, shapes, text, number stamps,
+> blur/pixelate — then copy or save. Natively on **GNOME Wayland**, where
+> Flameshot's interactive mode no longer works.
 
-On GNOME/Wayland, normal apps can't grab the screen or draw a fullscreen overlay
-(mutter implements neither `wlr-screencopy` nor `wlr-layer-shell`), which is why
-Flameshot's interactive mode broke there. A shell extension runs *inside* the
-compositor, so it legitimately can — ArrowShot does the whole capture-and-annotate
-flow natively.
+ArrowShot is a GNOME Shell extension that brings a Flameshot-style
+capture-and-annotate workflow to modern GNOME.
+
+**Why an extension?** On Wayland, ordinary apps can't grab the screen or paint a
+fullscreen overlay — mutter implements neither `wlr-screencopy` nor
+`wlr-layer-shell`, which is exactly why Flameshot's interactive mode broke on
+GNOME/Wayland. A shell extension runs *inside* the compositor, so it's allowed to
+do both; ArrowShot uses that to run the whole flow natively. (It works on Xorg
+sessions too — it lives in the shell, not the display protocol.)
 
 ## Features
 
@@ -33,6 +38,23 @@ flow natively.
 | `Enter` | save + copy + close |
 | `Delete` | delete selected shape |
 | `Esc` | deselect, or cancel |
+
+## Compatibility
+
+ArrowShot is a GNOME Shell extension, so what matters is your **GNOME Shell
+version**, not the specific distro or session type. It runs on both **Wayland and
+Xorg** (it lives inside the shell) — development and testing are on Wayland.
+
+| GNOME Shell | Example releases | Status |
+|-------------|------------------|--------|
+| 46 | Ubuntu 24.04 LTS · Fedora 40 | ✅ Tested |
+| 47 | Ubuntu 24.10 · Fedora 41 | ☑️ Declared — expected to work |
+| 48 | Ubuntu 25.04 · Fedora 42 | ☑️ Declared — expected to work |
+| 45 | Ubuntu 23.10 | ⚠️ Declared — untested |
+| 44 and older | Ubuntu ≤ 23.04 (incl. 22.04 LTS = GNOME 42) | ❌ Unsupported |
+
+GNOME 44 and older predate the ESM extension API (introduced in GNOME 45), so
+ArrowShot won't load there without a port to the legacy extension format.
 
 ## Install
 
