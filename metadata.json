@@ -2,6 +2,6 @@
   "uuid": "arrowshot@omnimed.com",
   "name": "ArrowShot",
   "description": "Flameshot-style region capture + annotation for GNOME Wayland: arrow, line, rectangle, ellipse, pen, highlighter, text, number stamps, blur and pixelate. Select/move/delete shapes, resize the region, undo/redo, color + thickness. Saves to ~/Pictures/Screenshots and copies to the clipboard.",
-  "shell-version": ["46", "47", "48"],
+  "shell-version": ["45", "46", "47", "48"],
   "settings-schema": "org.gnome.shell.extensions.arrowshot"
 }
