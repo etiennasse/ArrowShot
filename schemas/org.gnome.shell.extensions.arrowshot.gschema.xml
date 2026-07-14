@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.arrowshot"
+          path="/org/gnome/shell/extensions/arrowshot/">
+    <key name="capture-shortcut" type="as">
+      <default><![CDATA[['<Control>Print']]]></default>
+      <summary>Capture with arrow</summary>
+      <description>Shortcut that starts a region capture with annotation.</description>
+    </key>
+    <key name="default-color" type="s">
+      <default>'red'</default>
+      <summary>Default stroke color</summary>
+      <description>Palette name used for new annotations: red, orange, yellow, green, blue, white, black.</description>
+    </key>
+    <key name="default-width" type="i">
+      <default>4</default>
+      <summary>Default line thickness (px)</summary>
+      <description>Initial stroke width for new annotations.</description>
+    </key>
+    <key name="save-directory" type="s">
+      <default>''</default>
+      <summary>Save directory</summary>
+      <description>Folder for saved screenshots. Empty means ~/Pictures/Screenshots.</description>
+    </key>
+  </schema>
+</schemalist>

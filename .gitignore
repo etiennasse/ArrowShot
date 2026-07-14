@@ -1,0 +1,6 @@
+# Compiled GSettings schema (build artifact — regenerate with glib-compile-schemas)
+schemas/gschemas.compiled
+
+# Editor / OS cruft
+*~
+.DS_Store
