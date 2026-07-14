@@ -47,9 +47,9 @@ Xorg** (it lives inside the shell) — development and testing are on Wayland.
 
 | GNOME Shell | Example releases | Status |
 |-------------|------------------|--------|
-| 46 | Ubuntu 24.04 LTS · Fedora 40 | ✅ Tested |
-| 47 | Ubuntu 24.10 · Fedora 41 | ☑️ Declared — expected to work |
 | 48 | Ubuntu 25.04 · Fedora 42 | ☑️ Declared — expected to work |
+| 47 | Ubuntu 24.10 · Fedora 41 | ☑️ Declared — expected to work |
+| 46 | Ubuntu 24.04 LTS · Fedora 40 | ✅ Tested |
 | 45 | Ubuntu 23.10 | ⚠️ Declared — untested |
 | 44 and older | Ubuntu ≤ 23.04 (incl. 22.04 LTS = GNOME 42) | ❌ Unsupported |
 
