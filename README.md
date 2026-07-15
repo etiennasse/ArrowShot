@@ -7,6 +7,9 @@
 ArrowShot is a GNOME Shell extension that brings a Flameshot-style
 capture-and-annotate workflow to modern GNOME.
 
+[Kooha-2026-07-15-10-30-21.webm](https://github.com/user-attachments/assets/e8094613-45e9-48c9-9399-e4fc554a9f19)
+
+
 **Why an extension?** On Wayland, ordinary apps can't grab the screen or paint a
 fullscreen overlay — mutter implements neither `wlr-screencopy` nor
 `wlr-layer-shell`, which is exactly why Flameshot's interactive mode broke on
