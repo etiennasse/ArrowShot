@@ -121,6 +121,7 @@ class CaptureSession {
         this._liveEl = null;   // committed element temporarily on the live layer while moved
         this._liveGeom = null; // {x, y, w, h} of the live layer, stage coords
         this._curBBox = null;  // running bbox of the in-progress pen stroke
+        this._liveLaterId = 0; // pending frame-clock-coalesced live repaint
         this._activeEntry = null;
         this._toolButtons = new Map();
         this._swatches = new Map();
@@ -978,7 +979,28 @@ class CaptureSession {
             this._updateAnnotClips();
         }
         this._annotLive.show();
-        this._annotLive.queue_repaint();
+        if (dragging)
+            this._queueLiveRepaint();
+        else
+            this._annotLive.queue_repaint();
+    }
+
+    // Coalesce motion-driven repaints to the frame clock: pointer events
+    // arrive far faster than the compositor paints, and each
+    // St.DrawingArea.queue_repaint() is an immediate full-surface raster.
+    // One BEFORE_REDRAW later per frame rasterizes once with the latest state.
+    _queueLiveRepaint() {
+        if (this._liveLaterId)
+            return;
+        this._liveLaterId = global.compositor.get_laters().add(
+            Meta.LaterType.BEFORE_REDRAW, () => {
+                this._liveLaterId = 0;
+                if (this._annotLive)
+                    this._annotLive.queue_repaint();
+                return GLib.SOURCE_REMOVE;
+            });
+        // Make sure a frame is actually scheduled to run the later.
+        this._annotLive.queue_redraw();
     }
 
     _paintAnnotBase(area) {
@@ -1386,6 +1408,10 @@ class CaptureSession {
             } catch (e) {}
         }
         this._ids = [];
+        if (this._liveLaterId) {
+            global.compositor.get_laters().remove(this._liveLaterId);
+            this._liveLaterId = 0;
+        }
         this._setCursor('DEFAULT');
         this._hideTooltip();
 
