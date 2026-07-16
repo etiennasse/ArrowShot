@@ -117,6 +117,7 @@ class CaptureSession {
         this._resize = null;   // active selection-resize drag
         this._selected = null; // element selected with the select tool
         this._move = null;     // active element-move drag
+        this._regionMove = null; // active whole-region move drag
         this._activeEntry = null;
         this._toolButtons = new Map();
         this._swatches = new Map();
@@ -162,10 +163,13 @@ class CaptureSession {
         this._ui = new St.Widget({x: 0, y: 0, width: w, height: h});
         Main.layoutManager.uiGroup.add_child(this._ui);
 
-        // Dim + selection chrome.
-        this._chrome = new St.DrawingArea({x: 0, y: 0, width: w, height: h});
+        // Dim + selection chrome — GPU actors (repositioned, never re-rasterized).
+        // A full-stage cairo repaint per motion event re-uploads a multi-monitor-
+        // sized texture every frame; repositioning lightweight widgets stays at
+        // compositor framerate, matching GNOME's own screenshot UI.
+        this._chrome = new St.Widget({x: 0, y: 0, width: w, height: h});
         this._ui.add_child(this._chrome);
-        this._ids.push([this._chrome, this._chrome.connect('repaint', a => this._paintChrome(a))]);
+        this._buildChrome();
 
         // Vector annotation layer.
         this._annot = new St.DrawingArea({x: 0, y: 0, width: w, height: h});
@@ -191,7 +195,7 @@ class CaptureSession {
         this._canvas.grab_key_focus();
 
         this._setCursor('CROSSHAIR');
-        this._chrome.queue_repaint();
+        this._layoutChrome();
     }
 
     // ---- input ----------------------------------------------------------
@@ -219,12 +223,22 @@ class CaptureSession {
             return Clutter.EVENT_STOP;
         }
 
-        // Select tool: pick and move an existing element.
+        // Select tool: grab an element to move it, or empty interior to move
+        // the whole crop region (edges already resize via _edgeHit above).
         if (this._tool === 'select') {
             const el = this._hitTest(x, y);
-            this._selected = el;
-            this._move = el ? {el, ox: x, oy: y, snap: this._snapshot(el)} : null;
-            this._dragging = !!el;
+            if (el) {
+                this._selected = el;
+                this._move = {el, ox: x, oy: y, snap: this._snapshot(el)};
+                this._dragging = true;
+            } else if (this._insideRegion(x, y)) {
+                this._selected = null;
+                this._regionMove = {ox: x, oy: y, rx: this._region.x, ry: this._region.y};
+                this._dragging = true;
+            } else {
+                this._selected = null;
+                this._dragging = false;
+            }
             this._annot.queue_repaint();
             return Clutter.EVENT_STOP;
         }
@@ -259,7 +273,7 @@ class CaptureSession {
                 x: Math.min(this._dx0, x), y: Math.min(this._dy0, y),
                 w: Math.abs(x - this._dx0), h: Math.abs(y - this._dy0),
             };
-            this._chrome.queue_repaint();
+            this._layoutChrome();
         } else if (this._move) {
             const dx = x - this._move.ox, dy = y - this._move.oy;
             this._applyTranslate(this._move.el, this._move.snap, dx, dy);
@@ -272,7 +286,20 @@ class CaptureSession {
             if (z.edges.has('t')) t = y;
             if (z.edges.has('b')) b = y;
             this._region = {x: Math.min(l, r), y: Math.min(t, b), w: Math.abs(r - l), h: Math.abs(t - b)};
-            this._chrome.queue_repaint();
+            this._layoutChrome();
+            this._layoutAnnot();
+            this._annot.queue_repaint();
+            if (this._toolbar)
+                this._positionToolbar();
+        } else if (this._regionMove) {
+            const m = this._regionMove;
+            const nx = Math.max(0, Math.min(m.rx + (x - m.ox), this._stageW - this._region.w));
+            const ny = Math.max(0, Math.min(m.ry + (y - m.oy), this._stageH - this._region.h));
+            this._region.x = nx;
+            this._region.y = ny;
+            this._layoutChrome();
+            this._layoutAnnot();
+            this._annot.queue_repaint();
             if (this._toolbar)
                 this._positionToolbar();
         } else if (this._current) {
@@ -299,17 +326,23 @@ class CaptureSession {
             if (this._region && this._region.w > 4 && this._region.h > 4) {
                 this._phase = EDIT;
                 this._setCursor('DEFAULT');
+                this._layoutAnnot();
                 this._buildToolbar();
             } else {
                 this._region = null;
             }
-            this._chrome.queue_repaint();
+            this._layoutChrome();
             return Clutter.EVENT_STOP;
         }
 
         if (this._resize) {
             this._resize = null;
-            this._chrome.queue_repaint();
+            this._layoutChrome();
+            return Clutter.EVENT_STOP;
+        }
+
+        if (this._regionMove) {
+            this._regionMove = null;
             return Clutter.EVENT_STOP;
         }
 
@@ -343,6 +376,11 @@ class CaptureSession {
         return Clutter.EVENT_STOP;
     }
 
+    _insideRegion(x, y) {
+        const r = this._region;
+        return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    }
+
     _edgeHit(px, py) {
         const r = this._region;
         if (!r || r.w <= 0 || r.h <= 0)
@@ -367,7 +405,7 @@ class CaptureSession {
         if (e)
             this._setCursor(this._cursorForEdges(e));
         else if (this._tool === 'select')
-            this._setCursor(this._hitTest(x, y) ? 'MOVE_OR_RESIZE_WINDOW' : 'DEFAULT');
+            this._setCursor(this._hitTest(x, y) || this._insideRegion(x, y) ? 'MOVE_OR_RESIZE_WINDOW' : 'DEFAULT');
         else
             this._setCursor(this._tool === 'text' ? 'IBEAM' : 'CROSSHAIR');
     }
@@ -714,70 +752,111 @@ class CaptureSession {
 
     // ---- rendering ------------------------------------------------------
 
-    _paintChrome(area) {
-        const cr = area.get_context();
-        cr.setSourceRGBA(0, 0, 0, DIM_ALPHA);
-        cr.paint();
+    _buildChrome() {
+        // Four dim strips that frame the (transparent) selection hole, a border,
+        // eight resize handles, and a size readout — all repositioned on demand.
+        const dimStyle = `background-color: rgba(0,0,0,${DIM_ALPHA});`;
+        this._dim = [];
+        for (let i = 0; i < 4; i++) {
+            const strip = new St.Widget({style: dimStyle});
+            this._chrome.add_child(strip);
+            this._dim.push(strip);
+        }
+        this._border = new St.Widget({style: 'border: 1px solid rgba(255,255,255,0.9);', visible: false});
+        this._chrome.add_child(this._border);
+
+        this._handles = [];
+        for (let i = 0; i < 8; i++) {
+            const hd = new St.Widget({
+                style: 'background-color: rgba(255,255,255,0.95); border-radius: 1px;',
+                width: 8, height: 8, visible: false,
+            });
+            this._chrome.add_child(hd);
+            this._handles.push(hd);
+        }
+
+        this._sizeLabel = new St.Label({
+            style: 'background-color: rgba(0,0,0,0.65); color: #fff; padding: 3px 6px; ' +
+                   'border-radius: 4px; font-size: 12px;',
+            visible: false,
+        });
+        this._chrome.add_child(this._sizeLabel);
+
+        this._layoutChrome();
+    }
+
+    _layoutChrome() {
+        const W = this._stageW, H = this._stageH;
         const r = this._region;
-        if (r && r.w > 0 && r.h > 0) {
-            cr.setOperator(cairo.Operator.CLEAR);
-            cr.rectangle(r.x, r.y, r.w, r.h);
-            cr.fill();
-            cr.setOperator(cairo.Operator.OVER);
-            cr.setSourceRGBA(1, 1, 1, 0.9);
-            cr.setLineWidth(1);
-            cr.rectangle(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
-            cr.stroke();
-            if (this._phase === SELECT)
-                this._paintSizeLabel(cr, r);
-            else
-                this._paintHandles(cr, r);
+        if (!r || r.w <= 0 || r.h <= 0) {
+            // No selection yet — dim the whole stage with strip 0.
+            this._dim[0].set_position(0, 0);
+            this._dim[0].set_size(W, H);
+            for (let i = 1; i < 4; i++)
+                this._dim[i].set_size(0, 0);
+            this._border.hide();
+            for (const hd of this._handles) hd.hide();
+            this._sizeLabel.hide();
+            return;
         }
-        cr.$dispose();
+        const rx = Math.round(r.x), ry = Math.round(r.y);
+        const rw = Math.round(r.w), rh = Math.round(r.h);
+        this._dim[0].set_position(0, 0);        this._dim[0].set_size(W, ry);                          // top
+        this._dim[1].set_position(0, ry + rh);  this._dim[1].set_size(W, Math.max(0, H - ry - rh));    // bottom
+        this._dim[2].set_position(0, ry);       this._dim[2].set_size(rx, rh);                         // left
+        this._dim[3].set_position(rx + rw, ry); this._dim[3].set_size(Math.max(0, W - rx - rw), rh);   // right
+
+        this._border.set_position(rx, ry);
+        this._border.set_size(rw, rh);
+        this._border.show();
+
+        if (this._phase === EDIT) {
+            this._sizeLabel.hide();
+            this._layoutHandles(rx, ry, rw, rh);
+        } else {
+            for (const hd of this._handles) hd.hide();
+            this._layoutSizeLabel(rx, ry, rw, rh);
+        }
     }
 
-    _paintHandles(cr, r) {
-        const hs = 4;
-        const xs = [r.x, r.x + r.w / 2, r.x + r.w];
-        const ys = [r.y, r.y + r.h / 2, r.y + r.h];
-        cr.setSourceRGBA(1, 1, 1, 0.95);
-        for (const hx of xs) {
-            for (const hy of ys) {
-                if (hx === r.x + r.w / 2 && hy === r.y + r.h / 2)
-                    continue; // no center handle
-                cr.rectangle(hx - hs, hy - hs, hs * 2, hs * 2);
-                cr.fill();
-            }
+    _layoutHandles(rx, ry, rw, rh) {
+        const cx = rx + rw / 2, cy = ry + rh / 2;
+        const pts = [
+            [rx, ry], [cx, ry], [rx + rw, ry],
+            [rx, cy], [rx + rw, cy],
+            [rx, ry + rh], [cx, ry + rh], [rx + rw, ry + rh],
+        ];
+        for (let i = 0; i < 8; i++) {
+            this._handles[i].set_position(Math.round(pts[i][0] - 4), Math.round(pts[i][1] - 4));
+            this._handles[i].show();
         }
     }
 
-    _paintSizeLabel(cr, r) {
-        const label = `${Math.round(r.w)} × ${Math.round(r.h)}`;
-        cr.setFontSize(13);
-        let tw = label.length * 8;
-        let th = 13;
-        try {
-            const ext = cr.textExtents(label);
-            if (ext && ext.width) {
-                tw = ext.width;
-                th = ext.height;
-            }
-        } catch (e) {}
-        const padX = 6, padY = 4;
-        let bx = r.x;
-        let by = r.y - th - padY * 2 - 2;
+    _layoutSizeLabel(rx, ry, rw, rh) {
+        this._sizeLabel.set_text(`${rw} × ${rh}`);
+        const [, , natW, natH] = this._sizeLabel.get_preferred_size();
+        let by = ry - natH - 4;
         if (by < 2)
-            by = r.y + 2;
-        cr.setSourceRGBA(0, 0, 0, 0.65);
-        cr.rectangle(bx, by, tw + padX * 2, th + padY * 2);
-        cr.fill();
-        cr.setSourceRGBA(1, 1, 1, 1);
-        cr.moveTo(bx + padX, by + th + padY - 1);
-        cr.showText(label);
+            by = ry + 4;
+        this._sizeLabel.set_position(rx, Math.round(by));
+        this._sizeLabel.show();
+    }
+
+    // Size the annotation surface to the selection region (not the whole stage)
+    // so each cairo repaint rasterizes/uploads only the region, not the desktop.
+    _layoutAnnot() {
+        const r = this._region;
+        if (!r)
+            return;
+        this._annot.set_position(Math.round(r.x), Math.round(r.y));
+        this._annot.set_size(Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h)));
     }
 
     _paintAnnot(area) {
         const cr = area.get_context();
+        const r = this._region;
+        if (r)
+            cr.translate(-Math.round(r.x), -Math.round(r.y));
         for (const el of this._elements) {
             if (el.tool === 'text' || isRedact(el.tool))
                 continue;
