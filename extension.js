@@ -118,6 +118,9 @@ class CaptureSession {
         this._selected = null; // element selected with the select tool
         this._move = null;     // active element-move drag
         this._regionMove = null; // active whole-region move drag
+        this._liveEl = null;   // committed element temporarily on the live layer while moved
+        this._liveGeom = null; // {x, y, w, h} of the live layer, stage coords
+        this._curBBox = null;  // running bbox of the in-progress pen stroke
         this._activeEntry = null;
         this._toolButtons = new Map();
         this._swatches = new Map();
@@ -171,10 +174,16 @@ class CaptureSession {
         this._ui.add_child(this._chrome);
         this._buildChrome();
 
-        // Vector annotation layer.
-        this._annot = new St.DrawingArea({x: 0, y: 0, width: w, height: h});
-        this._ui.add_child(this._annot);
-        this._ids.push([this._annot, this._annot.connect('repaint', a => this._paintAnnot(a))]);
+        // Vector annotation layers. St.DrawingArea re-rasterizes its whole
+        // surface synchronously on every queue_repaint()/allocate, so the
+        // committed shapes live on a stage-anchored base layer repainted only
+        // when the element set changes (region changes are pure GPU clip
+        // moves), while the in-progress stroke and selection indicator live
+        // on a small layer sized to their bounding box.
+        this._annotBase = null; // created lazily on first committed shape
+        this._annotLive = new St.DrawingArea({visible: false});
+        this._ui.add_child(this._annotLive);
+        this._ids.push([this._annotLive, this._annotLive.connect('repaint', a => this._paintAnnotLive(a))]);
 
         // Transparent reactive canvas that catches drawing input.
         this._canvas = new St.Widget({reactive: true, can_focus: true, x: 0, y: 0, width: w, height: h});
@@ -230,6 +239,11 @@ class CaptureSession {
             if (el) {
                 this._selected = el;
                 this._move = {el, ox: x, oy: y, snap: this._snapshot(el)};
+                // Lift the element onto the live layer for the drag so the
+                // base layer doesn't re-rasterize on every motion event.
+                this._liveEl = this._isCairoEl(el) ? el : null;
+                if (this._liveEl)
+                    this._repaintBase();
                 this._dragging = true;
             } else if (this._insideRegion(x, y)) {
                 this._selected = null;
@@ -239,7 +253,7 @@ class CaptureSession {
                 this._selected = null;
                 this._dragging = false;
             }
-            this._annot.queue_repaint();
+            this._updateLive();
             return Clutter.EVENT_STOP;
         }
 
@@ -252,12 +266,15 @@ class CaptureSession {
             this._placeNumber(x, y);
         } else if (this._tool === 'pen' || this._tool === 'highlight') {
             this._current = {tool: this._tool, points: [[x, y]], color: this._color, width: this._width};
+            this._curBBox = {minx: x, miny: y, maxx: x, maxy: y};
+            this._updateLive();
         } else if (isRedact(this._tool)) {
             // Create the redact patch up-front so it previews live while dragging.
             const actor = this._makeRedactActor(this._tool, x, y, 0, 0);
             this._current = {tool: this._tool, x0: x, y0: y, x1: x, y1: y, actor, x, y, w: 0, h: 0};
         } else {
             this._current = {tool: this._tool, x0: x, y0: y, x1: x, y1: y, color: this._color, width: this._width};
+            this._updateLive();
         }
         return Clutter.EVENT_STOP;
     }
@@ -277,7 +294,7 @@ class CaptureSession {
         } else if (this._move) {
             const dx = x - this._move.ox, dy = y - this._move.oy;
             this._applyTranslate(this._move.el, this._move.snap, dx, dy);
-            this._annot.queue_repaint();
+            this._updateLive(true);
         } else if (this._resize) {
             const z = this._resize;
             let l = z.l, r = z.r, t = z.t, b = z.b;
@@ -287,8 +304,7 @@ class CaptureSession {
             if (z.edges.has('b')) b = y;
             this._region = {x: Math.min(l, r), y: Math.min(t, b), w: Math.abs(r - l), h: Math.abs(t - b)};
             this._layoutChrome();
-            this._layoutAnnot();
-            this._annot.queue_repaint();
+            this._updateAnnotClips();
             if (this._toolbar)
                 this._positionToolbar();
         } else if (this._regionMove) {
@@ -298,20 +314,28 @@ class CaptureSession {
             this._region.x = nx;
             this._region.y = ny;
             this._layoutChrome();
-            this._layoutAnnot();
-            this._annot.queue_repaint();
+            this._updateAnnotClips();
             if (this._toolbar)
                 this._positionToolbar();
         } else if (this._current) {
             if (this._current.points) {
                 this._current.points.push([x, y]);
+                const bb = this._curBBox;
+                if (bb) {
+                    bb.minx = Math.min(bb.minx, x);
+                    bb.miny = Math.min(bb.miny, y);
+                    bb.maxx = Math.max(bb.maxx, x);
+                    bb.maxy = Math.max(bb.maxy, y);
+                }
+                this._updateLive(true);
             } else {
                 this._current.x1 = x;
                 this._current.y1 = y;
                 if (isRedact(this._current.tool))
-                    this._updateBlurClip(this._current);
+                    this._updateBlurClip(this._current); // GPU clip; no raster needed
+                else
+                    this._updateLive(true);
             }
-            this._annot.queue_repaint();
         }
         return Clutter.EVENT_STOP;
     }
@@ -326,7 +350,7 @@ class CaptureSession {
             if (this._region && this._region.w > 4 && this._region.h > 4) {
                 this._phase = EDIT;
                 this._setCursor('DEFAULT');
-                this._layoutAnnot();
+                this._updateAnnotClips();
                 this._buildToolbar();
             } else {
                 this._region = null;
@@ -348,6 +372,12 @@ class CaptureSession {
 
         if (this._move) {
             this._move = null;
+            if (this._liveEl) {
+                // Drop the moved element back onto the base layer.
+                this._liveEl = null;
+                this._repaintBase();
+            }
+            this._updateLive();
             return Clutter.EVENT_STOP;
         }
 
@@ -372,7 +402,8 @@ class CaptureSession {
         }
 
         this._current = null;
-        this._annot.queue_repaint();
+        this._curBBox = null;
+        this._updateLive();
         return Clutter.EVENT_STOP;
     }
 
@@ -547,7 +578,8 @@ class CaptureSession {
         if (el.actor)
             el.actor.destroy();
         this._redo = [];
-        this._annot.queue_repaint();
+        this._repaintBase();
+        this._updateLive();
     }
 
     _onScroll(event) {
@@ -572,6 +604,7 @@ class CaptureSession {
         this._elements.push(el);
         this._redo = [];
         this._selected = null;
+        this._repaintBase();
     }
 
     _onKey(event) {
@@ -583,7 +616,7 @@ class CaptureSession {
         if (sym === Clutter.KEY_Escape) {
             if (this._selected) {
                 this._selected = null;
-                this._annot.queue_repaint();
+                this._updateLive();
                 return Clutter.EVENT_STOP;
             }
             this._teardown();
@@ -634,7 +667,8 @@ class CaptureSession {
             el.actor.hide();
         this._redo.push(el);
         this._selected = null;
-        this._annot.queue_repaint();
+        this._repaintBase();
+        this._updateLive();
     }
 
     _redoAction() {
@@ -645,7 +679,8 @@ class CaptureSession {
             el.actor.show();
         this._elements.push(el);
         this._selected = null;
-        this._annot.queue_repaint();
+        this._repaintBase();
+        this._updateLive();
     }
 
     // ---- text tool ------------------------------------------------------
@@ -659,7 +694,7 @@ class CaptureSession {
             width: Math.max(120, Math.min(500, (this._region.x + this._region.w) - x)),
         });
         this._ui.add_child(entry);
-        this._ui.set_child_above_sibling(entry, this._annot);
+        this._ui.set_child_above_sibling(entry, this._annotLive);
         this._activeEntry = entry;
         entry.grab_key_focus();
 
@@ -694,7 +729,7 @@ class CaptureSession {
                 x: Math.round(tx), y: Math.round(ty),
             });
             this._ui.add_child(label);
-            this._ui.set_child_above_sibling(label, this._annot);
+            this._ui.set_child_above_sibling(label, this._annotLive);
             this._commit({tool: 'text', color: this._color, actor: label});
         }
         entry.destroy();
@@ -706,7 +741,6 @@ class CaptureSession {
 
     _placeNumber(x, y) {
         this._commit({tool: 'number', x, y, n: this._stampCounter++, color: this._color, width: this._width});
-        this._annot.queue_repaint();
         if (this._canvas)
             this._canvas.grab_key_focus();
     }
@@ -842,27 +876,128 @@ class CaptureSession {
         this._sizeLabel.show();
     }
 
-    // Size the annotation surface to the selection region (not the whole stage)
-    // so each cairo repaint rasterizes/uploads only the region, not the desktop.
-    _layoutAnnot() {
+    _isCairoEl(el) {
+        return el.tool !== 'text' && !isRedact(el.tool);
+    }
+
+    // Repaint the committed-shapes layer (creating it on first use). Called
+    // only on discrete element-set changes (commit/undo/redo/delete/move),
+    // never per motion event: each call is a full stage-sized raster.
+    _repaintBase() {
+        if (!this._annotBase) {
+            if (!this._elements.some(el => this._isCairoEl(el)))
+                return;
+            this._annotBase = new St.DrawingArea({x: 0, y: 0, width: this._stageW, height: this._stageH});
+            this._ui.insert_child_below(this._annotBase, this._annotLive);
+            this._ids.push([this._annotBase, this._annotBase.connect('repaint', a => this._paintAnnotBase(a))]);
+            this._updateAnnotClips();
+            return; // first allocation rasterizes it
+        }
+        this._annotBase.queue_repaint();
+    }
+
+    // Region changes never re-rasterize the annotation layers: both are
+    // stage-anchored in content, so only their GPU clip moves.
+    _updateAnnotClips() {
         const r = this._region;
         if (!r)
             return;
-        this._annot.set_position(Math.round(r.x), Math.round(r.y));
-        this._annot.set_size(Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h)));
+        const rx = Math.round(r.x), ry = Math.round(r.y);
+        const rw = Math.max(0, Math.round(r.w)), rh = Math.max(0, Math.round(r.h));
+        if (this._annotBase)
+            this._annotBase.set_clip(rx, ry, rw, rh);
+        if (this._liveGeom)
+            this._annotLive.set_clip(rx - this._liveGeom.x, ry - this._liveGeom.y, rw, rh);
     }
 
-    _paintAnnot(area) {
+    // Stage-coords bbox of everything the live layer must display, or null.
+    _liveBBoxNeeded() {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        const add = (bb, m) => {
+            x0 = Math.min(x0, bb.x - m);
+            y0 = Math.min(y0, bb.y - m);
+            x1 = Math.max(x1, bb.x + bb.w + m);
+            y1 = Math.max(y1, bb.y + bb.h + m);
+        };
+        // Margin covers half line widths, arrowheads (width*4+6) and the
+        // highlighter's 3.5x stroke; 12 also covers the selection dashes.
+        const cur = this._current;
+        if (cur && this._isCairoEl(cur)) {
+            const m = (cur.width || 4) * 4 + 12;
+            if (this._curBBox) {
+                const b = this._curBBox;
+                add({x: b.minx, y: b.miny, w: b.maxx - b.minx, h: b.maxy - b.miny}, m);
+            } else {
+                add(this._bbox(cur), m);
+            }
+        }
+        if (this._liveEl)
+            add(this._bbox(this._liveEl), (this._liveEl.width || 4) * 4 + 12);
+        if (this._selected)
+            add(this._bbox(this._selected), 14);
+        if (x0 === Infinity)
+            return null;
+        return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
+    }
+
+    // Fit the live layer to what it must show and repaint it. The geometry is
+    // chunk-aligned and grow-only while dragging so steady pointer motion
+    // almost never reallocates the surface (St re-rasterizes on allocate).
+    _updateLive(dragging = false) {
+        const need = this._liveBBoxNeeded();
+        if (!need) {
+            this._annotLive.hide();
+            this._liveGeom = null;
+            return;
+        }
+        const g = this._liveGeom;
+        const contained = g && need.x >= g.x && need.y >= g.y &&
+            need.x + need.w <= g.x + g.w && need.y + need.h <= g.y + g.h;
+        if (!contained) {
+            const C = 256;
+            let nx = Math.floor(need.x / C) * C;
+            let ny = Math.floor(need.y / C) * C;
+            let nr = Math.ceil((need.x + need.w) / C) * C;
+            let nb = Math.ceil((need.y + need.h) / C) * C;
+            if (g && dragging && this._current) {
+                // Grow-only while drawing: the whole in-progress shape must
+                // stay visible. Moves instead re-anchor to the element's
+                // current bbox so the surface stays small.
+                nx = Math.min(nx, g.x);
+                ny = Math.min(ny, g.y);
+                nr = Math.max(nr, g.x + g.w);
+                nb = Math.max(nb, g.y + g.h);
+            }
+            nx = Math.max(0, nx);
+            ny = Math.max(0, ny);
+            nr = Math.min(this._stageW, nr);
+            nb = Math.min(this._stageH, nb);
+            this._liveGeom = {x: nx, y: ny, w: Math.max(1, nr - nx), h: Math.max(1, nb - ny)};
+            this._annotLive.set_position(nx, ny);
+            this._annotLive.set_size(this._liveGeom.w, this._liveGeom.h);
+            this._updateAnnotClips();
+        }
+        this._annotLive.show();
+        this._annotLive.queue_repaint();
+    }
+
+    _paintAnnotBase(area) {
         const cr = area.get_context();
-        const r = this._region;
-        if (r)
-            cr.translate(-Math.round(r.x), -Math.round(r.y));
         for (const el of this._elements) {
-            if (el.tool === 'text' || isRedact(el.tool))
+            if (!this._isCairoEl(el) || el === this._liveEl)
                 continue;
             this._renderShape(cr, el);
         }
-        if (this._current)
+        cr.$dispose();
+    }
+
+    _paintAnnotLive(area) {
+        const cr = area.get_context();
+        if (this._liveGeom)
+            cr.translate(-this._liveGeom.x, -this._liveGeom.y);
+        if (this._liveEl)
+            this._renderShape(cr, this._liveEl);
+        if (this._current && this._isCairoEl(this._current))
             this._renderShape(cr, this._current);
         if (this._selected) {
             const bb = this._bbox(this._selected);
@@ -1112,7 +1247,7 @@ class CaptureSession {
         this._tool = id;
         if (id !== 'select') {
             this._selected = null;
-            this._annot.queue_repaint();
+            this._updateLive();
         }
         this._highlightTool();
         this._setCursor(id === 'text' ? 'IBEAM' : (id === 'select' ? 'DEFAULT' : 'CROSSHAIR'));
@@ -1183,7 +1318,12 @@ class CaptureSession {
         // Keep only backdrop + blur + vector + text; drop dim, selection,
         // toolbar, and the selection indicator so none bake into the image.
         this._selected = null;
-        this._annot.queue_repaint();
+        this._current = null;
+        if (this._liveEl) {
+            this._liveEl = null;
+            this._repaintBase();
+        }
+        this._annotLive.hide();
         this._chrome.hide();
         if (this._toolbar)
             this._toolbar.hide();
@@ -1254,7 +1394,7 @@ class CaptureSession {
             this._grab = null;
         }
         // Destroying these parents also destroys all child + blur + text actors.
-        for (const name of ['_toolbar', '_canvas', '_annot', '_chrome', '_ui', '_blurGroup', '_bg']) {
+        for (const name of ['_toolbar', '_canvas', '_annotLive', '_annotBase', '_chrome', '_ui', '_blurGroup', '_bg']) {
             if (this[name]) {
                 this[name].destroy();
                 this[name] = null;
