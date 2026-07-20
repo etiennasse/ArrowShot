@@ -152,6 +152,45 @@ async function _benchOne(ext, sc) {
     const N = (sc.seconds || 5) * 250;
 
     let benchT0;
+    if (sc.mode === 'commit') {
+        // Measure the synchronous cost of committing a shape on button release.
+        // Each release runs _commit -> _repaintBase, which rasters the base
+        // layer; this is the frame the user perceives as a stutter. We time the
+        // release call itself and the wall gap until the next stage paint (which
+        // includes the GPU texture upload of the freshly-rastered base surface).
+        const K = sc.commits || 20;
+        const span = sc.span || 400;
+        const rel = [];
+        for (let k = 0; k < K; k++) {
+            const bx = r.x + 60 + (k % 5) * 40;
+            const by = r.y + 60 + (k % 4) * 50;
+            session._onPress(ev(bx, by));
+            for (let j = 1; j <= 8; j++)
+                session._onMotion(ev(bx + span * j / 8, by + (span * 0.6) * j / 8));
+            await _benchWait(20);
+            const t0 = GLib.get_monotonic_time();
+            session._onRelease(ev(bx + span, by + span * 0.6));
+            rel.push((GLib.get_monotonic_time() - t0) / 1000);
+            await _benchWait(30);
+        }
+        rel.sort((a, b) => a - b);
+        const baseSurf = session._annotBase
+            ? [session._annotBase.width, session._annotBase.height] : null;
+        log(`BENCH ${JSON.stringify({
+            label: sc.label,
+            region: [r.w, r.h],
+            mode: 'commit',
+            commits: K,
+            span,
+            baseSurface: baseSurf,
+            releaseMsMedian: +rel[Math.floor(K / 2)].toFixed(2),
+            releaseMsMax: +rel[K - 1].toFixed(2),
+            basePaints: perLayer._paintAnnotBase || 0,
+        })}`);
+        session._teardown();
+        await _benchWait(300);
+        return;
+    }
     if (sc.mode === 'static') {
         // No motion at all; drive stage frames by damaging a tiny chrome actor.
         // If _paintAnnot fires per frame here, something re-allocates the
