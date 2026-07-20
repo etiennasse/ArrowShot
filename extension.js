@@ -120,6 +120,7 @@ class CaptureSession {
         this._regionMove = null; // active whole-region move drag
         this._liveEl = null;   // committed element temporarily on the live layer while moved
         this._liveGeom = null; // {x, y, w, h} of the live layer, stage coords
+        this._baseGeom = null; // {x, y, w, h} of the base layer, stage coords
         this._curBBox = null;  // running bbox of the in-progress pen stroke
         this._liveLaterId = 0; // pending frame-clock-coalesced live repaint
         this._activeEntry = null;
@@ -881,32 +882,80 @@ class CaptureSession {
         return el.tool !== 'text' && !isRedact(el.tool);
     }
 
+    // Stage-coords bbox of a committed cairo shape, padded for stroke width /
+    // arrowheads / the highlighter's 3.5x line, so the raster is never clipped.
+    _elBBox(el) {
+        const bb = this._bbox(el);
+        const m = (el.width || 4) * 4 + 8;
+        return {x: bb.x - m, y: bb.y - m, w: bb.w + 2 * m, h: bb.h + 2 * m};
+    }
+
+    // Union bbox (stage coords) of the shapes the base layer must draw, i.e.
+    // every committed cairo element except one currently lifted onto the live
+    // layer for a move. null when there is nothing to bake.
+    _baseBBoxNeeded() {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const el of this._elements) {
+            if (!this._isCairoEl(el) || el === this._liveEl)
+                continue;
+            const bb = this._elBBox(el);
+            x0 = Math.min(x0, bb.x); y0 = Math.min(y0, bb.y);
+            x1 = Math.max(x1, bb.x + bb.w); y1 = Math.max(y1, bb.y + bb.h);
+        }
+        if (x0 === Infinity)
+            return null;
+        return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
+    }
+
     // Repaint the committed-shapes layer (creating it on first use). Called
     // only on discrete element-set changes (commit/undo/redo/delete/move),
-    // never per motion event: each call is a full stage-sized raster.
+    // never per motion event. The surface is sized to the shapes' bounding
+    // box (chunk-aligned), not the whole stage, so a commit rasters only the
+    // drawn area — key to a stutter-free release on a large/multi-monitor
+    // stage where a full-stage raster overruns the frame budget.
     _repaintBase() {
+        const need = this._baseBBoxNeeded();
+        if (!need) {
+            if (this._annotBase)
+                this._annotBase.hide();
+            this._baseGeom = null;
+            return;
+        }
         if (!this._annotBase) {
-            if (!this._elements.some(el => this._isCairoEl(el)))
-                return;
-            this._annotBase = new St.DrawingArea({x: 0, y: 0, width: this._stageW, height: this._stageH});
+            this._annotBase = new St.DrawingArea();
             this._ui.insert_child_below(this._annotBase, this._annotLive);
             this._ids.push([this._annotBase, this._annotBase.connect('repaint', a => this._paintAnnotBase(a))]);
-            this._updateAnnotClips();
-            return; // first allocation rasterizes it
         }
-        this._annotBase.queue_repaint();
+        this._annotBase.show();
+
+        const C = 256;
+        const nx = Math.max(0, Math.floor(need.x / C) * C);
+        const ny = Math.max(0, Math.floor(need.y / C) * C);
+        const nr = Math.min(this._stageW, Math.ceil((need.x + need.w) / C) * C);
+        const nb = Math.min(this._stageH, Math.ceil((need.y + need.h) / C) * C);
+        const g = this._baseGeom;
+        const geomChanged = !g || g.x !== nx || g.y !== ny || g.w !== nr - nx || g.h !== nb - ny;
+        if (geomChanged) {
+            this._baseGeom = {x: nx, y: ny, w: Math.max(1, nr - nx), h: Math.max(1, nb - ny)};
+            this._annotBase.set_position(nx, ny);
+            this._annotBase.set_size(this._baseGeom.w, this._baseGeom.h); // allocate rasterizes it
+            this._updateAnnotClips();
+        } else {
+            this._annotBase.queue_repaint();
+        }
     }
 
     // Region changes never re-rasterize the annotation layers: both are
-    // stage-anchored in content, so only their GPU clip moves.
+    // anchored to shape content, so only their GPU clip moves. Clips are in
+    // each layer's local coordinates (layer origin subtracted).
     _updateAnnotClips() {
         const r = this._region;
         if (!r)
             return;
         const rx = Math.round(r.x), ry = Math.round(r.y);
         const rw = Math.max(0, Math.round(r.w)), rh = Math.max(0, Math.round(r.h));
-        if (this._annotBase)
-            this._annotBase.set_clip(rx, ry, rw, rh);
+        if (this._baseGeom)
+            this._annotBase.set_clip(rx - this._baseGeom.x, ry - this._baseGeom.y, rw, rh);
         if (this._liveGeom)
             this._annotLive.set_clip(rx - this._liveGeom.x, ry - this._liveGeom.y, rw, rh);
     }
@@ -1005,6 +1054,8 @@ class CaptureSession {
 
     _paintAnnotBase(area) {
         const cr = area.get_context();
+        if (this._baseGeom)
+            cr.translate(-this._baseGeom.x, -this._baseGeom.y);
         for (const el of this._elements) {
             if (!this._isCairoEl(el) || el === this._liveEl)
                 continue;
