@@ -32,6 +32,16 @@ const MIN_WIDTH = 2;
 const MAX_WIDTH = 40;
 const HANDLE_TOL = 12; // px tolerance for grabbing a selection edge/corner
 
+// Meta.Cursor name → Clutter.CursorType name, where they differ (see _setCursor).
+const CLUTTER_CURSOR_NAMES = {
+    IBEAM: 'TEXT',
+    MOVE_OR_RESIZE_WINDOW: 'MOVE',
+    NORTH_RESIZE: 'N_RESIZE',
+    SOUTH_RESIZE: 'S_RESIZE',
+    WEST_RESIZE: 'W_RESIZE',
+    EAST_RESIZE: 'E_RESIZE',
+};
+
 // State phases.
 const SELECT = 0; // rubber-band the region
 const EDIT = 1;   // toolbar visible, drawing shapes
@@ -137,8 +147,16 @@ class CaptureSession {
         });
     }
 
+    // `name` is a Meta.Cursor name (GNOME 45–48). GNOME 49+ dropped Meta.Cursor and
+    // global.display.set_cursor() for per-actor Clutter.CursorType, whose names differ.
     _setCursor(name) {
         try {
+            if (Clutter.CursorType !== undefined) {
+                const c = Clutter.CursorType[CLUTTER_CURSOR_NAMES[name] ?? name];
+                if (c !== undefined)
+                    this._ui?.set_cursor_type(c);
+                return;
+            }
             const c = Meta.Cursor[name];
             if (c !== undefined)
                 global.display.set_cursor(c);
@@ -196,9 +214,10 @@ class CaptureSession {
         this._ids.push([this._canvas, this._canvas.connect('scroll-event', (a, e) => this._onScroll(e))]);
         this._ids.push([this._canvas, this._canvas.connect('key-press-event', (a, e) => this._onKey(e))]);
 
-        // Modal grab — bail cleanly if it fails.
+        // Modal grab — bail cleanly if it fails. Clutter.Grab lost get_seat_state() in
+        // GNOME 49+ (the shell itself no longer checks it), so only check where it exists.
         const grab = Main.pushModal(this._ui, {actionMode: Shell.ActionMode.SYSTEM_MODAL});
-        if (grab.get_seat_state() !== Clutter.GrabState.ALL) {
+        if (typeof grab.get_seat_state === 'function' && grab.get_seat_state() !== Clutter.GrabState.ALL) {
             Main.popModal(grab);
             throw new Error('ArrowShot: could not grab input');
         }

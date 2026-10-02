@@ -50,6 +50,8 @@ Xorg** (it lives inside the shell) — development and testing are on Wayland.
 
 | GNOME Shell | Example releases | Status |
 |-------------|------------------|--------|
+| 50 | Ubuntu 26.04 LTS · Fedora 44 | ✅ Tested (headless smoke run) |
+| 49 | Ubuntu 25.10 · Fedora 43 | ☑️ Declared — expected to work |
 | 48 | Ubuntu 25.04 · Fedora 42 | ☑️ Declared — expected to work |
 | 47 | Ubuntu 24.10 · Fedora 41 | ☑️ Declared — expected to work |
 | 46 | Ubuntu 24.04 LTS · Fedora 40 | ✅ Tested |
