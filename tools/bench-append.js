@@ -102,6 +102,7 @@ async function _benchOne(ext, sc) {
         await _benchWait(150); // let the entry get allocated, as in real typing
         session._commitText(); await _benchWait(30);
         await drag(250, 450, 450, 560, 'blur');
+        await drag(500, 450, 700, 560, 'pixelate');
         log(`SMOKE elements=${session._elements.length} redo=${session._redo.length}`);
         await session._confirm(false); // copies to clipboard + tears down
         await _benchWait(200);

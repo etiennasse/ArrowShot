@@ -14,6 +14,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -96,7 +97,9 @@ class PixelateEffect extends Shell.GLSLEffect {
             vec2 uv = cogl_tex_coord0_in.st;                          \n
             vec2 quv = (floor(uv / blockuv) + 0.5) * blockuv;         \n
             cogl_color_out = texture2D(cogl_sampler0, quv);           \n`;
-        this.add_glsl_snippet(Shell.SnippetHook.FRAGMENT, decl, src, false);
+        // Shell.SnippetHook was dropped for Cogl.SnippetHook in GNOME 49+.
+        const hook = (Shell.SnippetHook ?? Cogl.SnippetHook).FRAGMENT;
+        this.add_glsl_snippet(hook, decl, src, false);
     }
 
     setBlockUV(bx, by) {
